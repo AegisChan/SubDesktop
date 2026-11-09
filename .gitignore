@@ -1,0 +1,33 @@
+# Python cache & compiled bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.pytest_cache/
+.coverage
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Build & Dist Artifacts
+build/
+dist/
+*.spec
+
+# Test Sandboxes
+test_sandbox/
+tests/test_sandbox/
+
+# Profiles (keep skeleton via .gitkeep, ignore local profiles)
+profiles/*
+!profiles/.gitkeep
+
+# IDEs & Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
