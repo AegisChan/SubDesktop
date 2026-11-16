@@ -7,6 +7,7 @@ from typing import Optional
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QPixmap, QIcon
 from PyQt5.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -62,13 +63,30 @@ class ManagerWindow(QMainWindow):
         super().__init__(parent)
         self.setObjectName("ManagerWindow")
         self.setWindowTitle("SubDesktop - 子桌面管理控制台")
-        # 默认尺寸增大至 960x600，保证横向充裕排布
-        self.resize(960, 600)
-        self.setMinimumSize(880, 500)
+        self._apply_responsive_size()
 
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
         self.refresh_profiles()
+
+    def _apply_responsive_size(self):
+        """根据屏幕可用区域动态设置主窗口尺寸，兼容 150% 高 DPI 缩放"""
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail_geo = screen.availableGeometry()
+            avail_w = avail_geo.width()
+            avail_h = avail_geo.height()
+        else:
+            avail_w = 1280
+            avail_h = 720
+
+        min_w = min(840, int(avail_w * 0.85))
+        min_h = min(460, int(avail_h * 0.72))
+        self.setMinimumSize(min_w, min_h)
+
+        target_w = min(960, int(avail_w * 0.90))
+        target_h = min(600, int(avail_h * 0.85))
+        self.resize(target_w, target_h)
 
     def _setup_ui(self):
         central_widget = QWidget(self)

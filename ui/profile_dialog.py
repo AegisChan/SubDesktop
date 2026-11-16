@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
+    QApplication,
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -19,6 +20,8 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QFrame,
     QGroupBox,
+    QScrollArea,
+    QWidget,
 )
 
 from core.config import PRESET_RESOLUTIONS, DEFAULT_GRID_SIZE
@@ -42,17 +45,45 @@ class ProfileDialog(QDialog):
         self.clear_wallpaper = False
 
         self.setWindowTitle("编辑子桌面属性" if self.is_edit_mode else "新建独立子桌面")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(540)
         self._setup_ui()
         self._load_data()
+        self._apply_responsive_size()
+
+    def _apply_responsive_size(self):
+        """根据当前屏幕可用高度动态限高，防止 150% 高 DPI 缩放下底部按钮溢出屏幕"""
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail_geo = screen.availableGeometry()
+            max_h = int(avail_geo.height() * 0.88)
+            max_w = int(avail_geo.width() * 0.90)
+        else:
+            max_h = 600
+            max_w = 800
+
+        self.setMaximumHeight(max_h)
+        default_w = min(600, max_w)
+        default_h = min(580, max_h)
+        self.resize(default_w, default_h)
 
     def _setup_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(16)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setSpacing(12)
+        outer_layout.setContentsMargins(16, 16, 16, 16)
+
+        # 表单滚动区，保证高 DPI 小逻辑屏幕下内容可滚动且底部按钮永不被遮挡
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        scroll_content = QWidget(self.scroll_area)
+        main_layout = QVBoxLayout(scroll_content)
+        main_layout.setSpacing(14)
+        main_layout.setContentsMargins(4, 4, 8, 4)
 
         # 顶部提示栏（强调数据安全）
-        notice_frame = QFrame(self)
+        notice_frame = QFrame(scroll_content)
         notice_frame.setStyleSheet(
             "background-color: #dafbe1; border: 1px solid #4ac26b; border-radius: 6px; padding: 8px 12px;"
         )
@@ -68,20 +99,20 @@ class ProfileDialog(QDialog):
         notice_layout.addWidget(notice_lbl)
         main_layout.addWidget(notice_frame)
 
-        form_group = QGroupBox("基础属性与映射设置", self)
+        form_group = QGroupBox("基础属性与映射设置", scroll_content)
         form_layout = QFormLayout(form_group)
         form_layout.setSpacing(12)
 
         # 1. 子桌面名称
-        self.name_edit = QLineEdit(self)
+        self.name_edit = QLineEdit(form_group)
         self.name_edit.setPlaceholderText("例如: 工作日常、开发工作台、文档归档...")
         form_layout.addRow("子桌面名称(&N):", self.name_edit)
 
         # 2. 物理映射路径
         path_layout = QHBoxLayout()
-        self.path_edit = QLineEdit(self)
+        self.path_edit = QLineEdit(form_group)
         self.path_edit.setPlaceholderText("选择或输入非系统盘的物理文件夹路径...")
-        btn_browse = QPushButton("浏览(&B)...", self)
+        btn_browse = QPushButton("浏览(&B)...", form_group)
         btn_browse.clicked.connect(self._browse_target_folder)
         path_layout.addWidget(self.path_edit)
         path_layout.addWidget(btn_browse)
@@ -90,21 +121,21 @@ class ProfileDialog(QDialog):
         main_layout.addWidget(form_group)
 
         # 3. 视窗分辨率设置
-        res_group = QGroupBox("视窗尺寸与显示模式", self)
+        res_group = QGroupBox("视窗尺寸与显示模式", scroll_content)
         res_v_layout = QVBoxLayout(res_group)
         res_h_layout = QHBoxLayout()
 
-        self.res_combo = QComboBox(self)
+        self.res_combo = QComboBox(res_group)
         for label, w, h in PRESET_RESOLUTIONS:
             self.res_combo.addItem(label, (w, h))
         self.res_combo.currentIndexChanged.connect(self._on_preset_changed)
 
-        self.spin_width = QSpinBox(self)
+        self.spin_width = QSpinBox(res_group)
         self.spin_width.setRange(320, 7680)
         self.spin_width.setSuffix(" px")
         self.spin_width.valueChanged.connect(self._on_custom_size_changed)
 
-        self.spin_height = QSpinBox(self)
+        self.spin_height = QSpinBox(res_group)
         self.spin_height.setRange(240, 4320)
         self.spin_height.setSuffix(" px")
         self.spin_height.valueChanged.connect(self._on_custom_size_changed)
@@ -120,11 +151,11 @@ class ProfileDialog(QDialog):
         main_layout.addWidget(res_group)
 
         # 4. 壁纸设置与固化
-        wall_group = QGroupBox("壁纸与外观定制", self)
+        wall_group = QGroupBox("壁纸与外观定制", scroll_content)
         wall_layout = QHBoxLayout(wall_group)
 
         # 壁纸缩略图
-        self.wall_preview = QLabel(self)
+        self.wall_preview = QLabel(wall_group)
         self.wall_preview.setFixedSize(120, 68)
         self.wall_preview.setStyleSheet("border: 1px dashed #d0d7de; border-radius: 4px; background: #222;")
         self.wall_preview.setAlignment(Qt.AlignCenter)
@@ -133,15 +164,15 @@ class ProfileDialog(QDialog):
 
         wall_ctrl_layout = QVBoxLayout()
         wall_btn_layout = QHBoxLayout()
-        btn_choose_wall = QPushButton("选择本地壁纸...", self)
+        btn_choose_wall = QPushButton("选择本地壁纸...", wall_group)
         btn_choose_wall.clicked.connect(self._choose_wallpaper)
-        btn_clear_wall = QPushButton("清除壁纸", self)
+        btn_clear_wall = QPushButton("清除壁纸", wall_group)
         btn_clear_wall.clicked.connect(self._on_clear_wallpaper)
         wall_btn_layout.addWidget(btn_choose_wall)
         wall_btn_layout.addWidget(btn_clear_wall)
 
         wall_tip = QLabel(
-            "提示: 导入的壁纸将自动复制并隔离固化至当前 Profile 目录，源文件删除不影响展示。", self
+            "提示: 导入的壁纸将自动复制并隔离固化至当前 Profile 目录，源文件删除不影响展示。", wall_group
         )
         wall_tip.setStyleSheet("color: #6a737d; font-size: 11px;")
         wall_tip.setWordWrap(True)
@@ -152,18 +183,18 @@ class ProfileDialog(QDialog):
         main_layout.addWidget(wall_group)
 
         # 5. 排布设置
-        align_group = QGroupBox("排布与图标", self)
+        align_group = QGroupBox("排布与图标", scroll_content)
         align_layout = QHBoxLayout(align_group)
 
-        self.chk_grid = QCheckBox("开启网格吸附对齐", self)
+        self.chk_grid = QCheckBox("开启网格吸附对齐", align_group)
         self.chk_grid.setChecked(True)
 
-        self.spin_grid_size = QSpinBox(self)
+        self.spin_grid_size = QSpinBox(align_group)
         self.spin_grid_size.setRange(40, 200)
         self.spin_grid_size.setValue(DEFAULT_GRID_SIZE)
         self.spin_grid_size.setSuffix(" px")
 
-        self.combo_icon_size = QComboBox(self)
+        self.combo_icon_size = QComboBox(align_group)
         self.combo_icon_size.addItem("中等图标 (推荐)", "medium")
         self.combo_icon_size.addItem("小图标", "small")
         self.combo_icon_size.addItem("大图标", "large")
@@ -174,9 +205,14 @@ class ProfileDialog(QDialog):
         align_layout.addWidget(QLabel("图标尺寸:"))
         align_layout.addWidget(self.combo_icon_size)
         main_layout.addWidget(align_group)
+        main_layout.addStretch()
 
-        # 底部按钮栏
+        self.scroll_area.setWidget(scroll_content)
+        outer_layout.addWidget(self.scroll_area, 1)
+
+        # 底部固定按钮栏（始终常驻在 QScrollArea 下方）
         btn_box = QHBoxLayout()
+        btn_box.setContentsMargins(0, 4, 0, 0)
         btn_box.addStretch()
 
         self.btn_cancel = QPushButton("取消", self)
@@ -191,7 +227,7 @@ class ProfileDialog(QDialog):
 
         btn_box.addWidget(self.btn_cancel)
         btn_box.addWidget(self.btn_save)
-        main_layout.addLayout(btn_box)
+        outer_layout.addLayout(btn_box)
 
     def _load_data(self):
         if not self.is_edit_mode:

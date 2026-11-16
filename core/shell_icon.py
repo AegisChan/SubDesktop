@@ -4,7 +4,7 @@ from typing import Dict, Optional
 
 from PyQt5.QtCore import QFileInfo, Qt
 from PyQt5.QtGui import QIcon, QPixmap
-from PyQt5.QtWidgets import QFileIconProvider
+from PyQt5.QtWidgets import QApplication, QFileIconProvider
 
 class ShellIconHelper:
     """
@@ -48,12 +48,39 @@ class ShellIconHelper:
         return QIcon()
 
     @classmethod
-    def get_pixmap_for_path(cls, path_str: str, size: int = 48) -> QPixmap:
+    def clear_pixmap_cache(cls):
+        """清空贴图缓存（切换图标尺寸或屏幕 DPR 变化时调用）"""
+        cls._pix_cache.clear()
+
+    @classmethod
+    def _resolve_dpr(cls, dpr: Optional[float]) -> float:
+        if dpr is not None and dpr > 0:
+            return float(dpr)
+        app = QApplication.instance()
+        if app is not None:
+            screen = app.primaryScreen()
+            if screen is not None:
+                val = screen.devicePixelRatio()
+                if val > 0:
+                    return float(val)
+        return 1.0
+
+    @classmethod
+    def get_pixmap_for_path(
+        cls,
+        path_str: str,
+        size: int = 48,
+        dpr: Optional[float] = None,
+        phys_size: Optional[int] = None,
+    ) -> QPixmap:
         """
-        获取指定尺寸的高保真平滑贴图
-        强制采用 Qt.KeepAspectRatio 与 Qt.SmoothTransformation，消除白底图标边缘锯齿毛边
+        获取指定尺寸与屏幕缩放比（DPR）的高保真平滑贴图：
+        - 若显式传入 phys_size（如物理 48px），则严格输出 phys_size×phys_size 物理像素并绑定 DPR；
+        - 否则按 round(size * dpr) 计算目标物理像素。
         """
-        cache_key = f"{path_str}_{size}"
+        actual_dpr = cls._resolve_dpr(dpr)
+        target_phys = max(1, int(phys_size)) if phys_size and phys_size > 0 else max(1, int(round(size * actual_dpr)))
+        cache_key = f"{path_str}_{target_phys}_{actual_dpr:.2f}"
         if cache_key in cls._pix_cache:
             return cls._pix_cache[cache_key]
 
@@ -61,14 +88,24 @@ class ShellIconHelper:
         if icon.isNull():
             return QPixmap()
 
-        # 从多分辨率图标源（16/32/48/256）中提取与 size 最优匹配的贴图
-        pix = icon.pixmap(size, size)
+        # 优先尝试按物理像素尺寸提取；若提取尺寸不足 target_phys，则请求 256px 原图降采样
+        pix = icon.pixmap(target_phys, target_phys)
+        if not pix.isNull():
+            pix.setDevicePixelRatio(1.0)
+        if pix.isNull() or max(pix.width(), pix.height()) < target_phys:
+            hi_pix = icon.pixmap(256, 256)
+            if not hi_pix.isNull():
+                hi_pix.setDevicePixelRatio(1.0)
+                if max(hi_pix.width(), hi_pix.height()) > max(pix.width() if not pix.isNull() else 0, 0):
+                    pix = hi_pix
+
         if pix.isNull():
             return QPixmap()
 
-        # 若提取出的尺寸与目标不一致，显式使用高质量双线性平滑插值进行无损重采样
-        if pix.width() != size or pix.height() != size:
-            pix = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # 精确缩放到目标物理像素尺寸，并应用高质量双线性平滑插值
+        if pix.width() != target_phys or pix.height() != target_phys:
+            pix = pix.scaled(target_phys, target_phys, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
+        pix.setDevicePixelRatio(actual_dpr)
         cls._pix_cache[cache_key] = pix
         return pix

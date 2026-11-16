@@ -24,6 +24,7 @@ from core.config import (
 )
 from core.file_ops import FileOps
 from core.profile_storage import ProfileStorage
+from core.shell_icon import ShellIconHelper
 from ui.desktop_icon import DesktopIconWidget
 
 class DesktopCanvas(QWidget):
@@ -34,9 +35,15 @@ class DesktopCanvas(QWidget):
 
     open_settings_requested = pyqtSignal()
 
-    def __init__(self, profile_id: str, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        profile_id: str,
+        parent: Optional[QWidget] = None,
+        dpr_override: Optional[float] = None,
+    ):
         super().__init__(parent)
         self.profile_id = profile_id
+        self._dpr_override = dpr_override
         self.setObjectName("DesktopCanvas")
 
         # 核心参数
@@ -47,7 +54,7 @@ class DesktopCanvas(QWidget):
         self.auto_arrange = False
         self.wallpaper_pixmap: Optional[QPixmap] = None
 
-        # 标准网格单元系统
+        # 标准网格单元系统（逻辑像素，按 1 / dpr 由物理基准换算）
         self.cell_width = DEFAULT_CELL_WIDTH
         self.cell_height = DEFAULT_CELL_HEIGHT
         self.margin_x = GRID_MARGIN_X
@@ -67,6 +74,63 @@ class DesktopCanvas(QWidget):
 
         self.reload_config()
 
+    def get_dpr(self) -> float:
+        """获取画布当前所在屏幕的 devicePixelRatio（支持测试注入覆盖）"""
+        if self._dpr_override is not None and self._dpr_override > 0:
+            return float(self._dpr_override)
+        win = self.window()
+        if win is not None and hasattr(win, "_get_current_dpr"):
+            return float(win._get_current_dpr())
+        dpr = float(self.devicePixelRatioF()) if hasattr(self, "devicePixelRatioF") else 1.0
+        if dpr > 0:
+            return dpr
+        screen = QApplication.primaryScreen()
+        return float(screen.devicePixelRatio()) if screen and screen.devicePixelRatio() > 0 else 1.0
+
+    def to_logical(self, phys_val: float) -> int:
+        """物理像素 -> Qt 逻辑像素"""
+        return int(round(phys_val / self.get_dpr()))
+
+    def to_physical(self, logical_val: float) -> int:
+        """Qt 逻辑像素 -> 物理像素"""
+        return int(round(logical_val * self.get_dpr()))
+
+    def _update_grid_metrics(self):
+        """将物理网格步长与边距按 1 / dpr 换算为逻辑尺寸，抵消 Qt 高 DPI 缩放"""
+        cfg = ICON_SIZE_CONFIG.get(self.icon_size_mode, ICON_SIZE_CONFIG["medium"])
+        phys_w = cfg.get("cell_w", DEFAULT_CELL_WIDTH)
+        phys_h = cfg.get("cell_h", DEFAULT_CELL_HEIGHT)
+        self.cell_width = max(24, self.to_logical(phys_w))
+        self.cell_height = max(28, self.to_logical(phys_h))
+        self.margin_x = max(4, self.to_logical(GRID_MARGIN_X))
+        self.margin_y = max(4, self.to_logical(GRID_MARGIN_Y))
+        self.grid_size = phys_h
+
+    def apply_physical_metrics(self):
+        """
+        运行期动态 DPI 变化时实时重算画布所有物理度量：
+        重新计算网格步长、清缓存、按最新 DPR 刷新所有图标控件与贴图，
+        并将持久化的物理坐标重新映射为当前 DPR 下的逻辑坐标（绝不洗牌）。
+        """
+        self._update_grid_metrics()
+        ShellIconHelper.clear_pixmap_cache()
+
+        profile = ProfileStorage.get_profile(self.profile_id) or {}
+        raw_saved = profile.get("items_pos", {})
+        saved_positions = {os.path.basename(k): v for k, v in raw_saved.items()}
+
+        for clean_name, widget in self.icon_widgets.items():
+            widget.refresh_dpi_scale()
+            if clean_name in saved_positions:
+                pos = saved_positions[clean_name]
+                lx = self.to_logical(int(pos.get("x", GRID_MARGIN_X)))
+                ly = self.to_logical(int(pos.get("y", GRID_MARGIN_Y)))
+                if self.grid_align:
+                    lx, ly = self.snap_to_grid(lx, ly, clamp=True)
+                widget.move(lx, ly)
+
+        self.update()
+
     def reload_config(self):
         """重新载入 Profile 配置并刷新界面与壁纸"""
         profile = ProfileStorage.get_profile(self.profile_id)
@@ -79,11 +143,8 @@ class DesktopCanvas(QWidget):
         self.icon_size_mode = profile.get("icon_size", "medium")
         self.auto_arrange = bool(profile.get("auto_arrange", False))
 
-        # 更新标准自适应网格尺寸
-        cfg = ICON_SIZE_CONFIG.get(self.icon_size_mode, ICON_SIZE_CONFIG["medium"])
-        self.cell_width = cfg.get("cell_w", DEFAULT_CELL_WIDTH)
-        self.cell_height = cfg.get("cell_h", DEFAULT_CELL_HEIGHT)
-        self.grid_size = self.cell_height
+        # 更新标准自适应网格尺寸（按 1/dpr 换算）
+        self._update_grid_metrics()
 
         # 加载固化壁纸
         wall_path = ProfileStorage.get_wallpaper_path(self.profile_id)
@@ -95,22 +156,48 @@ class DesktopCanvas(QWidget):
         self.update()
         self.sync_items_from_disk()
 
+    def _get_canvas_bounds(self) -> Tuple[int, int]:
+        """获取当前子桌面可视画布有效逻辑宽高（未显示前按物理预设尺寸 / dpr 兜底）"""
+        if self.width() > 150 and self.height() > 150:
+            return self.width(), self.height()
+        profile = ProfileStorage.get_profile(self.profile_id) or {}
+        rect = profile.get("window_rect", {})
+        phys_w = max(320, int(rect.get("width", 960)))
+        phys_h = max(240, int(rect.get("height", 540)))
+        return max(200, self.to_logical(phys_w)), max(150, self.to_logical(phys_h))
+
+    def _get_max_grid_dims(self) -> Tuple[int, int]:
+        """计算当前可视画布可容纳的最大网格列数与行数"""
+        canvas_w, canvas_h = self._get_canvas_bounds()
+        max_cols = max(1, (canvas_w - self.margin_x) // self.cell_width)
+        max_rows = max(1, (canvas_h - self.margin_y) // self.cell_height)
+        return max_cols, max_rows
+
+    def _is_within_bounds(self, x: int, y: int) -> bool:
+        """判断给定图标左上角坐标是否完整落在可视画布边界内"""
+        canvas_w, canvas_h = self._get_canvas_bounds()
+        return (
+            self.margin_x <= x
+            and x + self.cell_width <= canvas_w
+            and self.margin_y <= y
+            and y + self.cell_height <= canvas_h
+        )
+
     def snap_to_grid(self, x: int, y: int, clamp: bool = False) -> Tuple[int, int]:
         """
         【自适应网格对齐】
         使用精准矩阵算法：margin + round((pos - margin) / cell) * cell
-        当 clamp=True 时，仅在画布已完全布局展开的前提下才执行边界防溢出，
-        在初始化载入时绝不截断存盘坐标。
         """
         col = max(0, round((x - self.margin_x) / self.cell_width))
         row = max(0, round((y - self.margin_y) / self.cell_height))
+
+        if clamp:
+            max_cols, max_rows = self._get_max_grid_dims()
+            col = min(col, max_cols - 1)
+            row = min(row, max_rows - 1)
+
         snapped_x = self.margin_x + col * self.cell_width
         snapped_y = self.margin_y + row * self.cell_height
-
-        if clamp and self.width() > 200 and self.height() > 200:
-            max_x = max(self.margin_x, self.width() - self.cell_width)
-            max_y = max(self.margin_y, self.height() - self.cell_height)
-            return min(snapped_x, max_x), min(snapped_y, max_y)
         return snapped_x, snapped_y
 
     def find_nearest_free_grid(
@@ -121,13 +208,14 @@ class DesktopCanvas(QWidget):
         occupied: Optional[set] = None,
     ) -> Tuple[int, int]:
         """
-        【严禁图标重叠：网格防碰撞占位机制】
-        1. 目标网格若为空，直接落入；
-        2. 若目标网格已被其他图标占据，以曼哈顿距离为核心、同列向下就近顺延搜索最近的空闲网格槽位。
-        保证每个网格永远仅存在一个图标，严禁坐标重叠遮挡。
+        【严禁图标重叠与视窗防越界：网格防碰撞占位机制】
+        1. 先将目标网格限定在当前可视画布的合法行列范围 (max_cols, max_rows) 内；
+        2. 目标网格若为空，直接落入；
+        3. 若已被占用，以曼哈顿距离为核心在可视区内就近寻找空闲网格，确保不重叠、不越界。
         """
-        col = max(0, round((target_x - self.margin_x) / self.cell_width))
-        row = max(0, round((target_y - self.margin_y) / self.cell_height))
+        max_cols, max_rows = self._get_max_grid_dims()
+        col = min(max(0, round((target_x - self.margin_x) / self.cell_width)), max_cols - 1)
+        row = min(max(0, round((target_y - self.margin_y) / self.cell_height)), max_rows - 1)
         cand_x = self.margin_x + col * self.cell_width
         cand_y = self.margin_y + row * self.cell_height
 
@@ -143,18 +231,13 @@ class DesktopCanvas(QWidget):
         if (cand_x, cand_y) not in occupied_slots:
             return cand_x, cand_y
 
-        # 目标已被占用：搜索曼哈顿距离最近的空闲槽位
-        profile = ProfileStorage.get_profile(self.profile_id) or {}
-        expected_h = profile.get("window_rect", {}).get("height", 540)
-        canvas_h = max(self.height(), expected_h, 400)
-        max_rows = max(1, (canvas_h - self.margin_y) // self.cell_height)
-
+        # 目标已被占用：在可视画布内搜索曼哈顿距离最近的空闲槽位
         best_slot = None
-        for max_d in range(1, 60):
+        max_search = max_cols + max_rows + 10
+        for max_d in range(1, max_search):
             candidates = []
             for r_diff in range(0, max_d + 1):
                 c_diff = max_d - r_diff
-                # 遍历可能的四个方向
                 for dc, dr in [
                     (0, r_diff), (0, -r_diff),
                     (c_diff, 0), (-c_diff, 0),
@@ -163,10 +246,9 @@ class DesktopCanvas(QWidget):
                 ]:
                     c = col + dc
                     r = row + dr
-                    if c >= 0 and 0 <= r < max_rows:
+                    if 0 <= c < max_cols and 0 <= r < max_rows:
                         slot = (self.margin_x + c * self.cell_width, self.margin_y + r * self.cell_height)
                         if slot not in occupied_slots:
-                            # 曼哈顿优先，同列顺延优先 (abs(dc))，欧几里得距离次优
                             cost = (max_d, abs(dc), dc**2 + dr**2, c, r)
                             candidates.append((cost, slot))
             if candidates:
@@ -208,6 +290,7 @@ class DesktopCanvas(QWidget):
         for fname, widget in self.icon_widgets.items():
             occupied_slots.add((widget.x(), widget.y()))
 
+        any_size_changed = False
         for clean_name, fpath in current_filenames.items():
             if clean_name not in self.icon_widgets:
                 widget = DesktopIconWidget(
@@ -220,21 +303,33 @@ class DesktopCanvas(QWidget):
                 widget.item_renamed.connect(self._on_item_renamed)
                 widget.item_deleted.connect(self._on_item_deleted)
 
-                # 确定摆放位置：精准防重叠
+                # 确定摆放位置：Config 内为物理坐标，需换算为逻辑坐标后再做对齐与防重叠
                 if clean_name in saved_positions and not self.auto_arrange:
                     pos = saved_positions[clean_name]
-                    raw_x, raw_y = int(pos.get("x", self.margin_x)), int(pos.get("y", self.margin_y))
+                    raw_x = self.to_logical(int(pos.get("x", GRID_MARGIN_X)))
+                    raw_y = self.to_logical(int(pos.get("y", GRID_MARGIN_Y)))
                     if self.grid_align:
                         cand_x, cand_y = self.snap_to_grid(raw_x, raw_y, clamp=False)
-                        if (cand_x, cand_y) in occupied_slots:
+                        if (cand_x, cand_y) in occupied_slots or not self._is_within_bounds(cand_x, cand_y):
                             x, y = self.find_nearest_free_grid(cand_x, cand_y, occupied=occupied_slots)
+                            ProfileStorage.update_item_position(
+                                self.profile_id, clean_name, self.to_physical(x), self.to_physical(y)
+                            )
                         else:
                             x, y = cand_x, cand_y
                     else:
-                        x, y = raw_x, raw_y
+                        if not self._is_within_bounds(raw_x, raw_y):
+                            x, y = self.find_nearest_free_grid(raw_x, raw_y, occupied=occupied_slots)
+                            ProfileStorage.update_item_position(
+                                self.profile_id, clean_name, self.to_physical(x), self.to_physical(y)
+                            )
+                        else:
+                            x, y = raw_x, raw_y
                 else:
                     x, y = self.find_nearest_free_grid(self.margin_x, self.margin_y, occupied=occupied_slots)
-                    ProfileStorage.update_item_position(self.profile_id, clean_name, x, y)
+                    ProfileStorage.update_item_position(
+                        self.profile_id, clean_name, self.to_physical(x), self.to_physical(y)
+                    )
 
                 widget.move(x, y)
                 widget.show()
@@ -243,22 +338,25 @@ class DesktopCanvas(QWidget):
             else:
                 widget = self.icon_widgets[clean_name]
                 widget.file_path = fpath
+                if widget.icon_size_mode != self.icon_size_mode:
+                    widget.set_icon_size_mode(self.icon_size_mode)
+                    any_size_changed = True
 
         if self.auto_arrange:
             self.rearrange_icons()
+        elif any_size_changed:
+            self._repack_grid_no_overlap()
 
     def _find_next_free_slot(self, occupied: set) -> Tuple[int, int]:
-        """按 Windows 经典桌面由上至下、由左至右寻找标准网格空槽位（高度以预期分辨率兜底）"""
-        profile = ProfileStorage.get_profile(self.profile_id) or {}
-        expected_h = profile.get("window_rect", {}).get("height", 540)
-        canvas_h = max(self.height(), expected_h, 400)
+        """按 Windows 经典桌面由上至下、由左至右寻找标准网格空槽位"""
+        _, canvas_h = self._get_canvas_bounds()
         col = 0
         while True:
             x = self.margin_x + col * self.cell_width
             row = 0
             while True:
                 y = self.margin_y + row * self.cell_height
-                if y + self.cell_height > canvas_h - self.margin_y:
+                if y + self.cell_height > canvas_h - self.margin_y and row > 0:
                     break
                 if (x, y) not in occupied:
                     return (x, y)
@@ -270,7 +368,7 @@ class DesktopCanvas(QWidget):
     def save_all_positions(self):
         """
         【全量坐标持久化兜底】
-        在窗口关闭（closeEvent）或重大操作时，将画布上所有控件的实际坐标写入 config.json
+        将画布上所有控件的逻辑坐标换算为物理像素坐标写入 config.json
         """
         profile = ProfileStorage.get_profile(self.profile_id)
         if not profile:
@@ -280,7 +378,10 @@ class DesktopCanvas(QWidget):
 
         for fname, widget in self.icon_widgets.items():
             clean_name = os.path.basename(fname)
-            profile["items_pos"][clean_name] = {"x": int(widget.x()), "y": int(widget.y())}
+            profile["items_pos"][clean_name] = {
+                "x": self.to_physical(widget.x()),
+                "y": self.to_physical(widget.y()),
+            }
 
         ProfileStorage.save_profile(profile)
 
@@ -299,17 +400,19 @@ class DesktopCanvas(QWidget):
         elif sort_by == "type":
             items.sort(key=lambda w: (not w.file_path.is_dir(), w.file_path.suffix.lower()))
 
-        canvas_h = max(self.height(), 400)
+        _, canvas_h = self._get_canvas_bounds()
         cur_x = self.margin_x
         cur_y = self.margin_y
 
         for w in items:
-            if cur_y + self.cell_height > canvas_h - self.margin_y:
+            if cur_y + self.cell_height > canvas_h - self.margin_y and cur_y > self.margin_y:
                 cur_y = self.margin_y
                 cur_x += self.cell_width
             w.move(cur_x, cur_y)
             clean_name = os.path.basename(w.filename)
-            ProfileStorage.update_item_position(self.profile_id, clean_name, cur_x, cur_y)
+            ProfileStorage.update_item_position(
+                self.profile_id, clean_name, self.to_physical(cur_x), self.to_physical(cur_y)
+            )
             cur_y += self.cell_height
 
     def deselect_all_icons(self, exclude: Optional[DesktopIconWidget] = None):
@@ -324,7 +427,9 @@ class DesktopCanvas(QWidget):
 
     def _on_item_position_changed(self, filename: str, x: int, y: int):
         clean_name = os.path.basename(filename)
-        ProfileStorage.update_item_position(self.profile_id, clean_name, x, y)
+        ProfileStorage.update_item_position(
+            self.profile_id, clean_name, self.to_physical(x), self.to_physical(y)
+        )
 
     def _on_item_renamed(self, old_name: str, new_name: str):
         old_clean = os.path.basename(old_name)
@@ -333,7 +438,9 @@ class DesktopCanvas(QWidget):
             w = self.icon_widgets.pop(old_clean)
             self.icon_widgets[new_clean] = w
             ProfileStorage.remove_item_position(self.profile_id, old_clean)
-            ProfileStorage.update_item_position(self.profile_id, new_clean, w.x(), w.y())
+            ProfileStorage.update_item_position(
+                self.profile_id, new_clean, self.to_physical(w.x()), self.to_physical(w.y())
+            )
 
     def _on_item_deleted(self, filename: str):
         clean_name = os.path.basename(filename)
@@ -456,7 +563,10 @@ class DesktopCanvas(QWidget):
 
                         occupied.add((free_x, free_y))
                         ProfileStorage.update_item_position(
-                            self.profile_id, clean_name, free_x, free_y
+                            self.profile_id,
+                            clean_name,
+                            self.to_physical(free_x),
+                            self.to_physical(free_y),
                         )
 
                     self.sync_items_from_disk()
@@ -541,10 +651,77 @@ class DesktopCanvas(QWidget):
 
         menu.exec_(global_pos)
 
+    def _repack_grid_no_overlap(self):
+        """
+        【局部防重叠微调（Lazy Anti-Collision）】
+        切换图标尺寸后，优先保留每个图标原有的物理 (x, y) 坐标（仅做当前新网格下的就近吸附对齐）：
+        - 若未发生网格碰撞且在视窗可视边界内，原封不动保留原位，禁止全局重新洗牌；
+        - 仅对发生碰撞重叠或超出边界的图标，就近寻找最近的空闲网格放置。
+        """
+        if not self.icon_widgets:
+            return
+
+        profile = ProfileStorage.get_profile(self.profile_id) or {}
+        raw_saved = profile.get("items_pos", {})
+        saved_positions = {os.path.basename(k): v for k, v in raw_saved.items()}
+
+        # 第一轮：按原位置就近吸附，不冲突且在边界内的图标直接保留原位
+        occupied = set()
+        conflicts = []
+        for clean_name, widget in self.icon_widgets.items():
+            if clean_name in saved_positions:
+                pos = saved_positions[clean_name]
+                raw_x = self.to_logical(int(pos.get("x", GRID_MARGIN_X)))
+                raw_y = self.to_logical(int(pos.get("y", GRID_MARGIN_Y)))
+            else:
+                raw_x, raw_y = widget.x(), widget.y()
+
+            sx, sy = self.snap_to_grid(raw_x, raw_y, clamp=True)
+            if (sx, sy) not in occupied and self._is_within_bounds(sx, sy):
+                widget.move(sx, sy)
+                occupied.add((sx, sy))
+            else:
+                conflicts.append((widget, sx, sy))
+
+        # 第二轮：仅对真正发生碰撞或越界的图标做局部顺延微调
+        for widget, sx, sy in conflicts:
+            free_x, free_y = self.find_nearest_free_grid(
+                sx, sy, exclude_widget=widget, occupied=occupied
+            )
+            widget.move(free_x, free_y)
+            occupied.add((free_x, free_y))
+
+        self.save_all_positions()
+
     def _change_icon_size(self, mode: str):
+        """切换视图图标尺寸（大/中/小图标）：持久化配置、清缓存、更新控件与网格并强制防碰撞重排"""
+        if mode not in ICON_SIZE_CONFIG:
+            return
+
         self.icon_size_mode = mode
-        ProfileStorage.update_profile(self.profile_id, {"icon_size": mode})
-        self.reload_config()
+        self._update_grid_metrics()
+
+        # 1. 更新并持久化 Profile 配置
+        ProfileStorage.update_profile(
+            self.profile_id,
+            {"icon_size": mode, "grid_size": self.grid_size},
+        )
+
+        # 2. 清空贴图缓存，确保按新尺寸与当前 DPR 重新提取
+        ShellIconHelper.clear_pixmap_cache()
+
+        # 3. 实时更新画布上所有已存在图标控件的尺寸与贴图
+        for widget in self.icon_widgets.values():
+            widget.set_icon_size_mode(mode)
+
+        # 4. 强制触发全局防碰撞网格重排，确保两两不重叠且不超出视窗边界
+        if self.auto_arrange:
+            self.rearrange_icons()
+        else:
+            self._repack_grid_no_overlap()
+
+        self.sync_items_from_disk()
+        self.update()
 
     def _toggle_grid_align(self):
         self.grid_align = not self.grid_align

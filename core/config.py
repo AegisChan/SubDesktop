@@ -30,19 +30,19 @@ PRESET_RESOLUTIONS = [
 ]
 
 # 图标尺寸与标准网格单元定义 (cell 宽, 高, 图标像素, 字体大小)
-DEFAULT_CELL_WIDTH = 76
-DEFAULT_CELL_HEIGHT = 90
+DEFAULT_CELL_WIDTH = 92
+DEFAULT_CELL_HEIGHT = 98
 GRID_MARGIN_X = 14
 GRID_MARGIN_Y = 14
 
 ICON_SIZE_CONFIG = {
-    "small": {"icon": 32, "cell_w": 68, "cell_h": 80, "width": 68, "height": 80, "font_size": 9},
-    "medium": {"icon": 48, "cell_w": 76, "cell_h": 90, "width": 76, "height": 90, "font_size": 9},
-    "large": {"icon": 64, "cell_w": 90, "cell_h": 105, "width": 90, "height": 105, "font_size": 9},
+    "small": {"icon": 32, "cell_w": 82, "cell_h": 94, "width": 82, "height": 94, "font_size": 9},
+    "medium": {"icon": 48, "cell_w": 92, "cell_h": 98, "width": 92, "height": 98, "font_size": 9},
+    "large": {"icon": 64, "cell_w": 112, "cell_h": 120, "width": 112, "height": 120, "font_size": 9},
 }
 
 # 默认网格步长
-DEFAULT_GRID_SIZE = 90
+DEFAULT_GRID_SIZE = 98
 
 # 默认子桌面配置骨架
 DEFAULT_PROFILE_TEMPLATE = {

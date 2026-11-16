@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from PyQt5.QtCore import Qt, QPoint, pyqtSignal, QSize, QFileInfo, QDateTime
-from PyQt5.QtGui import QIcon, QPixmap, QColor, QFont, QPainter, QBrush, QPen
+from PyQt5.QtGui import QIcon, QPixmap, QColor, QFont, QFontMetrics, QPainter, QBrush, QPen
 from PyQt5.QtWidgets import (
     QWidget,
     QLabel,
@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QGraphicsDropShadowEffect,
     QApplication,
+    QSizePolicy,
 )
 
 from core.file_ops import FileOps
@@ -76,37 +77,74 @@ class DesktopIconWidget(QWidget):
         self.is_dragging = False
         self.drag_start_pos = QPoint()
         self.is_editing = False
+        self._rendered_dpr: float = 0.0
 
         self._setup_ui()
 
-    def _setup_ui(self):
+    def _get_dpr(self) -> float:
+        if self.canvas is not None and hasattr(self.canvas, "get_dpr"):
+            return float(self.canvas.get_dpr())
+        dpr = float(self.devicePixelRatioF()) if hasattr(self, "devicePixelRatioF") else 1.0
+        return dpr if dpr > 0 else 1.0
+
+    def _apply_metrics(self):
+        """按 1 / dpr 将物理基准尺寸（图标、单元格、边距、字号）等比换算为 Qt 逻辑像素"""
+        dpr = self._get_dpr()
         cfg = ICON_SIZE_CONFIG.get(self.icon_size_mode, ICON_SIZE_CONFIG["medium"])
-        self.icon_pixel = cfg["icon"]
-        self.cell_w = cfg.get("cell_w", 76)
-        self.cell_h = cfg.get("cell_h", 90)
+        self.phys_icon_pixel = cfg["icon"]
+        self.phys_cell_w = cfg.get("cell_w", 92)
+        self.phys_cell_h = cfg.get("cell_h", 98)
+
+        self.icon_pixel = max(16, int(round(self.phys_icon_pixel / dpr)))
+        self.cell_w = max(24, int(round(self.phys_cell_w / dpr)))
+        base_cell_h = max(28, int(round(self.phys_cell_h / dpr)))
+
+        mh = max(1, int(round(2 / dpr)))
+        mv = max(1, int(round(3 / dpr)))
+        sp = max(1, int(round(5 / dpr)))
+
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(max(7, int(round(12 / dpr))))
+        font.setStyleStrategy(QFont.PreferAntialias)
+
+        # 计算双行文件名所需最小净高度（至少 36 物理像素，且不小于两行真实行距 + 余量）
+        fm = QFontMetrics(font)
+        line_h_2 = fm.lineSpacing() * 2 + max(2, int(round(6 / dpr)))
+        min_text_h = max(int(round(36 / dpr)), line_h_2)
+
+        required_cell_h = mv * 2 + self.icon_pixel + sp + min_text_h
+        self.cell_h = max(base_cell_h, required_cell_h)
+
         self.setFixedSize(self.cell_w, self.cell_h)
+        if hasattr(self, "icon_label"):
+            self.icon_label.setFixedSize(self.icon_pixel, self.icon_pixel)
+
+        if hasattr(self, "main_layout"):
+            self.main_layout.setContentsMargins(mh, mv, mh, mv)
+            self.main_layout.setSpacing(sp)
+
+        if hasattr(self, "text_label"):
+            self.text_label.setFont(font)
+            self.text_label.setMinimumHeight(min_text_h)
+            self.text_label.setStyleSheet("color: #ffffff; font-weight: 400;")
+        if hasattr(self, "edit_line"):
+            self.edit_line.setFont(font)
+
+    def _setup_ui(self):
         self.setStyleSheet("DesktopIconWidget { background: transparent; border: none; }")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 3, 2, 3)
-        layout.setSpacing(5)
-        layout.setAlignment(Qt.AlignCenter)
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
         # 1. 图标展示 (强制 SmoothPixmapTransform 高精度渲染)
         self.icon_label = QLabel(self)
         self.icon_label.setAlignment(Qt.AlignCenter)
-        self.icon_label.setFixedSize(self.icon_pixel, self.icon_pixel)
-        self.update_icon()
 
-        # 2. 文件名标签：采用 "Microsoft YaHei UI" 9pt、自然呼吸间距与微阴影
+        # 2. 文件名标签：锁定物理像素字号 12px（随 1/dpr 换算），确保双行文件名完整不被裁切
         self.text_label = QLabel(self.filename, self)
         self.text_label.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.text_label.setWordWrap(True)
-
-        font = QFont("Microsoft YaHei UI", 9)
-        font.setStyleStrategy(QFont.PreferAntialias)
-        self.text_label.setFont(font)
-        self.text_label.setStyleSheet("color: #ffffff; font-weight: 400; padding-top: 2px;")
+        self.text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
 
         # Subtle Drop Shadow（微阴影: blur=2, offset=(1,1), rgba(0,0,0,180)），消除粗糙感
         shadow = QGraphicsDropShadowEffect(self)
@@ -118,22 +156,52 @@ class DesktopIconWidget(QWidget):
         # 3. 重命名就地编辑框（使用支持失焦自动确认的 RenameLineEdit）
         self.edit_line = RenameLineEdit(self.filename, self)
         self.edit_line.setAlignment(Qt.AlignCenter)
-        self.edit_line.setFont(font)
         self.edit_line.setStyleSheet(
             "background-color: #ffffff; color: #1a1a1a; border: 1px solid #0969da; border-radius: 2px; padding: 1px;"
         )
         self.edit_line.returnPressed.connect(self._finish_rename)
         self.edit_line.hide()
 
-        layout.addWidget(self.icon_label, alignment=Qt.AlignCenter)
-        layout.addWidget(self.text_label, alignment=Qt.AlignCenter)
-        layout.addWidget(self.edit_line, alignment=Qt.AlignCenter)
+        self.main_layout.addWidget(self.icon_label, alignment=Qt.AlignCenter)
+        self.main_layout.addWidget(self.text_label, alignment=Qt.AlignCenter)
+        self.main_layout.addWidget(self.edit_line, alignment=Qt.AlignCenter)
+
+        self._apply_metrics()
+        self.update_icon()
 
     def update_icon(self):
-        """刷新图标渲染：采用高保真多分辨率平滑无锯齿贴图"""
-        pix = ShellIconHelper.get_pixmap_for_path(str(self.file_path), self.icon_pixel)
+        """刷新图标渲染：按物理基准像素提取并绑定当前 DPR，确保 100%~200% 下物理大小恒定"""
+        dpr = self._get_dpr()
+        self._rendered_dpr = dpr
+        pix = ShellIconHelper.get_pixmap_for_path(
+            str(self.file_path),
+            self.icon_pixel,
+            dpr=dpr,
+            phys_size=self.phys_icon_pixel,
+        )
         if not pix.isNull():
             self.icon_label.setPixmap(pix)
+
+    def set_icon_size_mode(self, mode: str):
+        """动态切换图标尺寸模式（large / medium / small），实时等比缩放控件、字号与图标"""
+        self.icon_size_mode = mode
+        self._apply_metrics()
+        self.update_icon()
+        self.updateGeometry()
+        self.update()
+
+    def refresh_dpi_scale(self):
+        """当窗口所在屏幕 DPR 变化时，重新换算所有逻辑尺寸与贴图"""
+        self._apply_metrics()
+        self.update_icon()
+        self.updateGeometry()
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        cur_dpr = self._get_dpr()
+        if cur_dpr > 0 and abs(cur_dpr - self._rendered_dpr) > 0.01:
+            self.refresh_dpi_scale()
 
     def set_selected(self, selected: bool):
         """设置选中高亮状态"""
